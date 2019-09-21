@@ -254,6 +254,220 @@ namespace FTWrapper
         }
     }
 
+    abstract class APIRestrictionParallel<TBuilder, TRequest, TReqClass>
+    {
+        /*
+        private static readonly Limitation unLockLmt = new Limitation { freq1 = (10, 30) };
+        private static readonly Limitation placeOrderLmt = new Limitation { freq1 = (15, 30), freq2 = (5, 1) };
+        private static readonly Limitation modifyOrderLmt = new Limitation { freq1 = (20, 30), freq2 = (5, 1) };
+        private static readonly Limitation getMaxTrdQtyLmt = new Limitation { freq1 = (10, 30) };
+        private static readonly Limitation getOrderListLmt = new Limitation { freq1 = (10, 30) };
+        private static readonly Limitation getOrderFillListLmt = new Limitation { freq1 = (10, 30) };
+        private static readonly Limitation getRehabLmt = new Limitation { freq1 = (10, 30) };
+        private static readonly Limitation getSymbolsLmt = new Limitation { freq1 = (10, 30) };
+        private static readonly Limitation reqHistoryKLLmt = new Limitation { freq1 = (10, 30) }; */
+
+
+        private static readonly object reqDicLock = new object();
+        private static readonly object reqQueueLock = new object();
+
+        protected FTClient client = null;
+        protected Limitation limitation = null;
+        protected Func<Task<int>> GetQuota;
+        protected Func<TRequest, Task<bool>> ReqFunc;
+
+        // variable for request history KLines limitation
+        protected Dictionary<TReqClass, DateTime> reqDic = new Dictionary<TReqClass, DateTime>();
+        protected ObservableCollection<TReqClass> reqQueue = new ObservableCollection<TReqClass>();
+        private ManualResetEvent mre = new ManualResetEvent(false);
+        private Thread thread;
+        private bool isThreadRunning = false;
+
+        public APIRestrictionParallel(FTClient client, Limitation lmt, Func<TRequest, Task<bool>> reqFunc, Func<Task<int>> getQuota = null)
+        {
+            this.client = client;
+            limitation = lmt;
+            GetQuota = getQuota;
+            ReqFunc = reqFunc;
+            reqQueue.CollectionChanged += ReqQueue_CollectionChanged;
+            Start();
+        }
+
+        private void Start()
+        {
+            thread = new Thread(HandleReqQueue);
+            thread.IsBackground = true;
+            thread.Start();
+        }
+        public void HandleReqQueue()
+        {
+            bool inProcesss = false;
+            while (true)
+            {
+                if (!inProcesss)
+                {
+                    inProcesss = true;
+                    isThreadRunning = true;
+                    mre.Reset();
+                    Task.Run(() => ProcessReqHisKLQueue())
+                        .ContinueWith(result =>
+                        {
+                            inProcesss = false;
+                            isThreadRunning = false;
+                            if (reqQueue.Count > 0)
+                                mre.Set();
+                        });
+                }
+                mre.WaitOne();
+            }
+        }
+
+        private void ReqQueue_CollectionChanged(object sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+        {
+            if (reqQueue.Count > 0)
+            {
+                if (!isThreadRunning)
+                    mre.Set();
+            }
+            else
+                mre.Reset();
+        }
+        protected abstract TBuilder MakeReqBuilder(TReqClass request);
+        public virtual async Task<bool> SendRequest(TReqClass request)
+        {
+            try
+            {
+                // remove out-of-date item
+                const int removal_period = 3600; //
+                foreach (var req in reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds > removal_period).ToList())
+                {
+                    lock (reqDicLock)
+                    {
+                        reqDic.Remove(req.Key);
+                    }
+                }
+
+                var lmt = limitation.freq1;
+                int tmp = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt.duration).Count();
+
+                var lmt2 = limitation.freq2;
+                int tmp2 = 0;
+                if (lmt2.reqNum > 0)
+                    tmp2 = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt2.duration).Count();
+
+                bool isAdded = false;
+                if (tmp < lmt.reqNum && ((lmt2.reqNum > 0 && tmp2 < lmt2.reqNum) || lmt2.reqNum == 0))
+                {
+                    lock (reqDicLock)
+                    {
+                        reqDic.Add(request, DateTime.Now);
+                    }
+                    TBuilder reqBuilder = MakeReqBuilder(request);
+                    bool succeed = await ReqFunc(((dynamic)reqBuilder).Build());
+                    if (succeed)
+                        isAdded = true;
+                    else
+                    {
+                        // Console.WriteLine("{0} request history KL failed", request.Security.Code);
+                    }
+                }
+                if (!isAdded)
+                {
+                    lock (reqQueueLock)
+                    {
+                        reqQueue.Add(request);
+                    }
+                    lock (reqDicLock)
+                    {
+                        reqDic.Remove(request);
+                    }
+                }
+                return true;
+            }
+            catch (Exception e)
+            {
+                throw e;
+            }
+        }
+        private async Task<List<(TReqClass request, bool succeed)>> ProcessReqHisKLQueue()
+        {
+            List<(TReqClass request, bool succeed)> result = new List<(TReqClass request, bool succeed)>();
+            var lmt = limitation.freq1;
+            var lmt2 = limitation.freq2;
+            //HistoryKLQuota quota = await client.RequestHistoryKLQuota();
+            int quota = int.MaxValue;
+            if (GetQuota != null)
+                quota = await GetQuota();
+            //Console.WriteLine("Remain Quota(ProcessReqHisKLQueue):" + quota.RemainQuota);
+            List<TReqClass> queue = null;
+            lock (reqQueueLock)
+            {
+                queue = this.reqQueue.ToList();
+            }
+            for (int i = 0; i < queue.Count; i++)
+            {
+                var request = queue[i];
+                if (quota <= 0)
+                {
+                    result.Add((request, false));
+                    lock (reqQueueLock)
+                    {
+                        this.reqQueue.Remove(request);
+                    }
+                }
+                else
+                {
+                    var list = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt.duration)?
+                        .OrderByDescending(x => x.Value)?.ToList();
+
+                    dynamic list2 = null;
+                    if (lmt2.reqNum > 0)
+                        list2 = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt2.duration)?
+                        .OrderByDescending(x => x.Value)?.ToList();
+
+                    if (((list != null && list.Count < lmt.reqNum) || list == null) &&
+                        ((list2 != null && list2.Count < lmt2.reqNum) || list2 == null))
+                    {
+                        TBuilder reqBuilder = MakeReqBuilder(request);
+                        bool succeed = await ReqFunc(((dynamic)reqBuilder).Build());
+                        if (succeed)
+                        {
+                            lock (reqDicLock)
+                            {
+                                reqDic.Add(request, DateTime.Now);
+                            }
+                            lock (reqQueueLock)
+                            {
+                                this.reqQueue.Remove(request);
+                            }
+                            quota--;
+                        }
+                        else
+                        {
+                            await Task.Delay(2000);
+                            i--;
+                        }
+                    }
+                    else
+                    {
+                        if (list != null)
+                        {
+                            var last = list.FirstOrDefault();
+                            await Task.Delay(lmt.duration * 1000 - (int)(DateTime.Now - last.Value).TotalMilliseconds);
+                        }
+                        if (list2 != null)
+                        {
+                            var last = list2.FirstOrDefault();
+                            await Task.Delay(lmt2.duration * 1000 - (int)(DateTime.Now - last.Value).TotalMilliseconds);
+                        }
+                        i--;
+                    }
+                }
+            }
+            return result;
+        }
+    }
+
     class CRequestHistoryKL : APIRestriction<QotRequestHistoryKL.Request.Builder, QotRequestHistoryKL.Request, ReqHisKL>
     {
         public CRequestHistoryKL(FTClient client, Limitation lmt, Func<QotRequestHistoryKL.Request, Task<bool>> reqFunc, Func<Task<int>> getQuota) :
