@@ -213,7 +213,8 @@ namespace Futu.OpenApi
         {
             if (this.channel != null)
             {
-                FTCAPI.ReleaseFTAPIChannel(this.channel);
+                //FTCAPI.ReleaseFTAPIChannel(this.channel);
+                FTCAPI.FTAPIChannel_Close(this.channel);
             }
         }
 

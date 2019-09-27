@@ -1008,14 +1008,18 @@ namespace FTWrapper
 
     public class FTClient
     {        
-        private string host = "localhost";
-        private ushort port = 0;
-        private bool isEnableEncrypt = false;
+        public string Host { get; private set; } = "localhost";
+        public ushort Port { get; private set; } = 0;
+        public bool IsEnableEncrypt { get; private set; } = false;
+        public ulong QotConnectID { get; private set; }
+        public ulong TrdConnectID { get; private set; }
+        public int ConnectStatus { get; private set; }
         //private RequestWithLimition requestWithLimition;
         private CRequestHistoryKL requestHistoryKL;
 
         internal FTAPI_Qot Qot { get; private set; }
         internal FTAPI_Trd Trd { get; private set; }
+
         public bool IsQotConnected { get; internal set; }
         public bool IsTrdConnected { get; internal set; }
         public bool IsLocked { get; internal set; } // lock for trade
@@ -1028,13 +1032,11 @@ namespace FTWrapper
 
         public FTClient(string host, ushort port, bool isEnableEncrypt = false, string info = "FTClient")
         {
-            this.host = host;
-            this.port = port;
-            this.isEnableEncrypt = isEnableEncrypt;
-            //requestWithLimition = new RequestWithLimition(this);
-            Limitation lmt = new Limitation { freq1 = (10, 30) };
-            requestHistoryKL = new CRequestHistoryKL(this, lmt, RequestHistoryKL, RequestHistoryKLQuota);
+            this.Host = host;
+            this.Port = port;
+            this.IsEnableEncrypt = isEnableEncrypt;
             
+                        
             FTAPI.Init();
             Qot = new FTAPI_Qot();            
 
@@ -1054,6 +1056,19 @@ namespace FTWrapper
 
             QotCallback.Notify += QotCallback_Notify;
             QotCallback.Subscription += QotCallback_Subscription;
+
+            QotConnCallback.InitConnected += QotConnCallback_InitConnected;
+            TrdConnCallback.InitConnected += TrdConnCallback_InitConnected;
+        }
+
+        private void TrdConnCallback_InitConnected(object sender, InitConnectedEventArgs e)
+        {
+            TrdConnectID = e.Client.GetConnectID();
+        }
+
+        private void QotConnCallback_InitConnected(object sender, InitConnectedEventArgs e)
+        {
+            QotConnectID = e.Client.GetConnectID();
         }
 
         private void QotCallback_Subscription(object sender, SubscriptionEventArgs e)
@@ -1083,21 +1098,29 @@ namespace FTWrapper
             Trd.Close();
         }
         
-        public void UnlockTrade(string pwd)
+        public void UnlockTrade(string pwd, string pwdMD5 = null)
         {
             if (!IsTrdConnected) return;
-
-            MD5 md5 = MD5.Create();
-            byte[] encryptionBytes = md5.ComputeHash(Encoding.UTF8.GetBytes(pwd));
-            string unlockPwdMd5 = BitConverter.ToString(encryptionBytes).Replace("-", "").ToLower();
+            string unlockPwdMd5 = null;
+            if (string.IsNullOrEmpty(pwdMD5))
+            {
+                MD5 md5 = MD5.Create();
+                byte[] encryptionBytes = md5.ComputeHash(Encoding.UTF8.GetBytes(pwd));
+                unlockPwdMd5 = BitConverter.ToString(encryptionBytes).Replace("-", "").ToLower();
+            }
+            else
+                unlockPwdMd5 = pwdMD5;
             TrdUnlockTrade.Request req = TrdUnlockTrade.Request.CreateBuilder().SetC2S(TrdUnlockTrade.C2S.CreateBuilder().SetUnlock(true).SetPwdMD5(unlockPwdMd5)).Build();
             uint serialNo = Trd.UnlockTrade(req);
         }
 
         public void Connect()
         {
-            Qot.InitConnect(host, port, isEnableEncrypt);
-            Trd.InitConnect(host, port, isEnableEncrypt);
+            Qot.InitConnect(Host, Port, IsEnableEncrypt);
+            Trd.InitConnect(Host, Port, IsEnableEncrypt);
+
+            Limitation lmt = new Limitation { freq1 = (10, 30) };
+            requestHistoryKL = new CRequestHistoryKL(this, lmt, RequestHistoryKL, RequestHistoryKLQuota<int>);
         }
 
         public async Task<(bool IsQotConnected, bool IsTrdConnected)> ConnectAsync()
@@ -1120,7 +1143,7 @@ namespace FTWrapper
             {
                 bool result = await FTTaskExt.FromEvent<InitConnectedEventArgs, bool>(
                     handler => QotConnCallback.InitConnected += new EventHandler<InitConnectedEventArgs>(handler),
-                    () => Qot.InitConnect(host, port, isEnableEncrypt),
+                    () => Qot.InitConnect(Host, Port, IsEnableEncrypt),
                     handler => QotConnCallback.InitConnected -= new EventHandler<InitConnectedEventArgs>(handler),
                     CancellationToken.None, this, timeout);
                 return result;
@@ -1137,7 +1160,7 @@ namespace FTWrapper
             {
                 bool result = await FTTaskExt.FromEvent<InitConnectedEventArgs, bool>(
                     handler => TrdConnCallback.InitConnected += new EventHandler<InitConnectedEventArgs>(handler),
-                    () => { return Trd.InitConnect(host, port, isEnableEncrypt); },
+                    () => { return Trd.InitConnect(Host, Port, IsEnableEncrypt); },
                     handler => TrdConnCallback.InitConnected -= new EventHandler<InitConnectedEventArgs>(handler),
                     CancellationToken.None, this, timeout);
                 return result;
@@ -1151,6 +1174,7 @@ namespace FTWrapper
         public void Disconnect()
         {
             Qot.Close();
+            Trd.Close();
         }
 
         public async Task<List<QotCommon.KLine>> GetKL(Security security, 
@@ -1447,7 +1471,7 @@ namespace FTWrapper
             //eClientSocket.reqCurrentTime();
         }
 
-        internal async Task<int> RequestHistoryKLQuota()
+        public async Task<T> RequestHistoryKLQuota<T>()
         {
             QotRequestHistoryKLQuota.Request.Builder reqBuilder = QotRequestHistoryKLQuota.Request.CreateBuilder();
             QotRequestHistoryKLQuota.C2S.Builder csBuilder = QotRequestHistoryKLQuota.C2S.CreateBuilder();
@@ -1466,7 +1490,13 @@ namespace FTWrapper
                         QotCallback.RequestHistoryKLQuota -= new EventHandler<RequestHistoryKLQuotaEventArgs>(handler);
                     },
                     CancellationToken.None, null, null, null, null);
-            return quota.RemainQuota;
+
+            if (typeof(T) == typeof(int))
+                return (T)Convert.ChangeType(quota.RemainQuota, typeof(T));
+            else if (typeof(T) == typeof(HistoryKLQuota))
+                return (T)Convert.ChangeType(quota, typeof(T));
+            else
+                return (T)Convert.ChangeType(null, typeof(T));
         }
 
         internal async Task<bool> RequestHistoryKL(QotRequestHistoryKL.Request request)

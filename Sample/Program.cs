@@ -7,6 +7,7 @@ using System.Threading;
 using Futu.OpenApi;
 using Futu.OpenApi.Pb;
 using System.Security.Cryptography;
+using FTWrapper;
 
 namespace FTAPI4NetSample
 {
@@ -37,8 +38,8 @@ namespace FTAPI4NetSample
                         csReqBuilder.SetIsSubOrUnSub(true);
                         csReqBuilder.SetIsRegOrUnRegPush(true);
                         reqBuilder.SetC2S(csReqBuilder);
-                        uint serialNo = qot.Sub(reqBuilder.Build());
-                        Console.WriteLine("Send Sub: {0}", serialNo);
+                        //uint serialNo = qot.Sub(reqBuilder.Build());
+                        //Console.WriteLine("Send Sub: {0}", serialNo);
                     }
                  
                 }
@@ -393,6 +394,7 @@ namespace FTAPI4NetSample
 
         static void Main(string[] args)
         {
+            
             FTAPI.Init();
             FTAPI_Qot client = new FTAPI_Qot();
             client.SetConnCallback(new SampleConnCallback());
@@ -406,10 +408,34 @@ namespace FTAPI4NetSample
             trd.SetTrdCallback(new SampleTrdCallback());
             trd.SetClientInfo("FTAPI4NET_Sample", 1);
             trd.InitConnect("127.0.0.1", 11111, false);
+
+            /*
+            FTClient client = new FTClient("127.0.0.1", 11111);
+            client.QotConnCallback.InitConnected += QotConnCallback_InitConnected;
+            client.QotConnCallback.Disconnected += QotConnCallback_Disconnected;
+            client.Connect();
+            */
+            
             while (true)
             {
-                Thread.Sleep(1000 * 60);
+                Thread.Sleep(1000);
+                //client.Close();
+                //client.Dispose();
+                Thread.Sleep(1000 * 200);
             }
         }
+
+        private static void QotConnCallback_Disconnected(object sender, FTWrapper.Events.DisconnectedEventArgs e)
+        {
+            Console.WriteLine("Disconnected");
+        }
+
+        private static void QotConnCallback_InitConnected(object sender, FTWrapper.Events.InitConnectedEventArgs e)
+        {
+            Console.WriteLine("connected");
+            
+        }
+
+
     }
 }

@@ -95,7 +95,7 @@ namespace FTWrapper
                     inProcesss = true;
                     isThreadRunning = true;
                     mre.Reset();
-                    Task.Run(() => ProcessReqHisKLQueue())
+                    Task.Run(() => ProcessReqQueue())
                         .ContinueWith(result =>
                         {
                             inProcesss = false;
@@ -134,12 +134,21 @@ namespace FTWrapper
                 }
 
                 var lmt = limitation.freq1;
-                int tmp = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt.duration).Count();
+                int tmp = 0;
+                lock (reqDicLock)
+                {
+                    tmp = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt.duration).Count();
+                }                    
 
                 var lmt2 = limitation.freq2;
                 int tmp2 = 0;
                 if (lmt2.reqNum > 0)
-                    tmp2 = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt2.duration).Count();
+                {
+                    lock (reqDicLock)
+                    {
+                        tmp2 = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt2.duration).Count();
+                    }
+                }                    
 
                 bool isAdded = false;
                 if (tmp < lmt.reqNum && ((lmt2.reqNum > 0 && tmp2 < lmt2.reqNum) || lmt2.reqNum == 0))
@@ -175,82 +184,101 @@ namespace FTWrapper
                 throw e;
             }
         }
-        private async Task<List<(TReqClass request, bool succeed)>> ProcessReqHisKLQueue()
+        private async Task<List<(TReqClass request, bool succeed)>> ProcessReqQueue()
         {
-            List<(TReqClass request, bool succeed)> result = new List<(TReqClass request, bool succeed)>();
-            var lmt = limitation.freq1;
-            var lmt2 = limitation.freq2;
-            //HistoryKLQuota quota = await client.RequestHistoryKLQuota();
-            int quota = int.MaxValue;
-            if (GetQuota != null)
-                quota = await GetQuota();
-            //Console.WriteLine("Remain Quota(ProcessReqHisKLQueue):" + quota.RemainQuota);
-            List<TReqClass> queue = null;
-            lock (reqQueueLock)
+            try
             {
-                queue = this.reqQueue.ToList();
-            }
-            for (int i = 0; i < queue.Count; i++)
-            {
-                var request = queue[i];
-                if (quota <= 0)
+                List<(TReqClass request, bool succeed)> result = new List<(TReqClass request, bool succeed)>();
+                var lmt = limitation.freq1;
+                var lmt2 = limitation.freq2;
+                //HistoryKLQuota quota = await client.RequestHistoryKLQuota();
+                int quota = int.MaxValue;
+                if (GetQuota != null)
+                    quota = await GetQuota();
+                //Console.WriteLine("Remain Quota(ProcessReqHisKLQueue):" + quota.RemainQuota);
+                List<TReqClass> queue = null;
+                lock (reqQueueLock)
                 {
-                    result.Add((request, false));
-                    lock (reqQueueLock)
-                    {
-                        this.reqQueue.Remove(request);
-                    }
+                    queue = this.reqQueue.ToList();
                 }
-                else
+                for (int i = 0; i < queue.Count; i++)
                 {
-                    var list = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt.duration)?
-                        .OrderByDescending(x => x.Value)?.ToList();
-
-                    dynamic list2 = null;
-                    if (lmt2.reqNum > 0)
-                        list2 = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt2.duration)?
-                        .OrderByDescending(x => x.Value)?.ToList();
-
-                    if (((list != null && list.Count < lmt.reqNum) || list == null) &&
-                        ((list2 != null && list2.Count < lmt2.reqNum) || list2 == null))
+                    var request = queue[i];
+                    if (quota <= 0)
                     {
-                        TBuilder reqBuilder = MakeReqBuilder(request);
-                        bool succeed = await ReqFunc(((dynamic)reqBuilder).Build());
-                        if (succeed)
+                        result.Add((request, false));
+                        lock (reqQueueLock)
                         {
-                            lock (reqDicLock)
-                            {
-                                reqDic.Add(request, DateTime.Now);
-                            }
-                            lock (reqQueueLock)
-                            {
-                                this.reqQueue.Remove(request);
-                            }
-                            quota--;
-                        }
-                        else
-                        {
-                            await Task.Delay(2000);
-                            i--;
+                            this.reqQueue.Remove(request);
                         }
                     }
                     else
                     {
-                        if (list != null)
+                        List<KeyValuePair<TReqClass, DateTime>> list = null;
+                        lock (reqDicLock)
                         {
-                            var last = list.FirstOrDefault();
-                            await Task.Delay(lmt.duration * 1000 - (int)(DateTime.Now - last.Value).TotalMilliseconds);
+                            list = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt.duration)?
+                                        .OrderByDescending(x => x.Value)?.ToList();
                         }
-                        if (list2 != null)
+
+                        List<KeyValuePair<TReqClass, DateTime>> list2 = null;
+                        if (lmt2.reqNum > 0)
                         {
-                            var last = list2.FirstOrDefault();
-                            await Task.Delay(lmt2.duration * 1000 - (int)(DateTime.Now - last.Value).TotalMilliseconds);
+                            lock (reqDicLock)
+                            {
+                                list2 = reqDic.Where(x => (DateTime.Now - x.Value).TotalSeconds <= lmt2.duration)?
+                                            .OrderByDescending(x => x.Value)?.ToList();
+                            }
                         }
-                        i--;
+                            
+
+                        if (((list != null && list.Count < lmt.reqNum) || list == null) &&
+                            ((list2 != null && list2.Count < lmt2.reqNum) || list2 == null))
+                        {
+                            TBuilder reqBuilder = MakeReqBuilder(request);
+                            bool succeed = await ReqFunc(((dynamic)reqBuilder).Build());
+                            if (succeed)
+                            {
+                                lock (reqDicLock)
+                                {
+                                    reqDic.Add(request, DateTime.Now);
+                                }
+                                lock (reqQueueLock)
+                                {
+                                    this.reqQueue.Remove(request);
+                                }
+                                quota--;
+                            }
+                            else
+                            {
+                                await Task.Delay(2000);
+                                i--;
+                            }
+                        }
+                        else
+                        {
+                            if (list != null)
+                            {
+                                var last = list.FirstOrDefault();
+                                await Task.Delay(lmt.duration * 1000 - (int)(DateTime.Now - last.Value).TotalMilliseconds);
+                            }
+                            if (list2 != null)
+                            {
+                                var last = list2.FirstOrDefault();
+                                await Task.Delay(lmt2.duration * 1000 - (int)(DateTime.Now - last.Value).TotalMilliseconds);
+                            }
+                            i--;
+                        }
                     }
                 }
+                return result;
             }
-            return result;
+            catch (Exception e)
+            {
+
+                throw e;
+            }
+            
         }
     }
 
@@ -516,6 +544,8 @@ namespace FTWrapper
 
     class CPlaceOrder : APIRestriction<TrdPlaceOrder.Request.Builder, QotRequestHistoryKL.Request, ReqHisKL>
     {
+        private ulong accID = 0;
+        private ulong cnxID = 0;
         public CPlaceOrder(FTClient client, Limitation lmt, Func<QotRequestHistoryKL.Request, Task<bool>> reqFunc, Func<Task<int>> getQuota) :
             base(client, lmt, reqFunc, getQuota)
         { }
@@ -524,7 +554,7 @@ namespace FTWrapper
         {
             TrdPlaceOrder.Request.Builder req = TrdPlaceOrder.Request.CreateBuilder();
             TrdPlaceOrder.C2S.Builder cs = TrdPlaceOrder.C2S.CreateBuilder();
-            Common.PacketID.Builder packetID = Common.PacketID.CreateBuilder().SetConnID(trd.GetConnectID()).SetSerialNo(0);
+            Common.PacketID.Builder packetID = Common.PacketID.CreateBuilder().SetConnID(cnxID).SetSerialNo(0);
             TrdCommon.TrdHeader.Builder trdHeader = TrdCommon.TrdHeader.CreateBuilder().SetAccID(this.accID).SetTrdEnv((int)TrdCommon.TrdEnv.TrdEnv_Real).SetTrdMarket((int)TrdCommon.TrdMarket.TrdMarket_HK);
             cs.SetPacketID(packetID).SetHeader(trdHeader).SetTrdSide((int)TrdCommon.TrdSide.TrdSide_Sell).SetOrderType((int)TrdCommon.OrderType.OrderType_AbsoluteLimit).SetCode("01810").SetQty(100.00).SetPrice(10.2).SetAdjustPrice(true);
             req.SetC2S(cs);

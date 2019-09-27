@@ -9,8 +9,9 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>FTAPI4NetSample</RootNamespace>
     <AssemblyName>Sample</AssemblyName>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
+    <TargetFrameworkProfile />
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -59,6 +60,10 @@
     <ProjectReference Include="..\FTAPI4Net\FTAPI4Net.csproj">
       <Project>{b52a46fe-170f-4cb5-ab42-f52c2dd50ed8}</Project>
       <Name>FTAPI4Net</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\FTWrapper\FTWrapper.csproj">
+      <Project>{2f76cb29-51a6-4194-8a3c-c3a3c93db47b}</Project>
+      <Name>FTWrapper</Name>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
